@@ -1,5 +1,4 @@
 import { App, type Octokit } from 'octokit';
-import type { WorkerEnv } from '../env.ts';
 
 export interface GitHubCredentials {
 	appId: string;
@@ -8,7 +7,10 @@ export interface GitHubCredentials {
 
 export type InstallationClient = Octokit;
 
-export function credentialsFromWorkerEnv(env: WorkerEnv): GitHubCredentials {
+export function credentialsFromWorkerEnv(env: {
+	GITHUB_APP_ID: string;
+	GITHUB_APP_PRIVATE_KEY: string;
+}): GitHubCredentials {
 	return {
 		appId: requiredValue('GITHUB_APP_ID', env.GITHUB_APP_ID),
 		privateKey: normalizePrivateKey(

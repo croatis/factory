@@ -2,10 +2,11 @@
  * Model selection for every factory agent.
  *
  * A model specifier is `<provider>/<model>`, resolved against the providers
- * bundled by `flue.config.ts`. Factory exposes only `cloudflare-ai-gateway/…`:
+ * bundled by each host. The Worker exposes only `cloudflare-ai-gateway/...`:
  * Workers AI, Anthropic, and other upstream models all run through the shared
  * gateway, whose credentials remain in Factory-scoped Worker secrets. Legacy
- * direct-provider names are normalized to gateway model ids during parsing.
+ * Anthropic/Workers AI aliases are normalized to gateway model ids during parsing.
+ * The Actions host registers only direct `openai/...` models and validates that boundary separately.
  *
  * The constants below are the defaults. A repository can override any of them
  * in `.github/factory.yml` (`adversary.blueTeam.model`,
@@ -25,6 +26,7 @@ export const MODEL_PROVIDERS = [AI_GATEWAY_PROVIDER] as const;
 export const LEGACY_MODEL_PROVIDERS = ['anthropic', 'cloudflare'] as const;
 export const MODEL_SPECIFIER_PROVIDERS = [
 	...MODEL_PROVIDERS,
+	'openai',
 	...LEGACY_MODEL_PROVIDERS,
 ] as const;
 
@@ -51,7 +53,7 @@ export function modelProvider(specifier: string): string | undefined {
 	return specifier.slice(0, separator);
 }
 
-/** Whether a specifier names the gateway or a supported legacy alias. */
+/** Whether a specifier names a supported host provider or legacy alias. */
 export function isSupportedModel(specifier: string): boolean {
 	const provider = modelProvider(specifier);
 	return (

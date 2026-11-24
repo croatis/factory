@@ -1,0 +1,72 @@
+name: Factory Triage for GitHub Actions
+description: Run Factory Triage in a prepared checkout using the direct OpenAI API.
+inputs:
+  read-token:
+    description: Token with repository and issue read access.
+    required: false
+  write-token:
+    description: Fallback publishing token. Use App credentials for automatic refresh on long runs.
+    required: false
+  app-id:
+    description: GitHub App client ID or App ID for renewable publishing credentials.
+    required: false
+  app-private-key:
+    description: GitHub App private key, scoped by the adapter to the target repository.
+    required: false
+  openai-api-key:
+    description: OpenAI API project key.
+    required: true
+  bot-logins:
+    description: Comma-separated bot identities to ignore in addition to GitHub Bot accounts.
+    default: ''
+  allow-submodule-publication:
+    description: Allow the fix stage to perform repository-required submodule commits and pushes.
+    default: 'false'
+  evidence-directory:
+    description: Evidence directory inside the workspace. Defaults to .triagebot/gh-<issue>.
+    default: ''
+  deadline-ms:
+    description: Absolute Unix deadline in milliseconds, leaving time for workflow cleanup.
+    default: ''
+  mode:
+    description: triage or proof. Proof verifies OpenAI and workspace tools without GitHub publication.
+    default: triage
+  event-name:
+    description: Optional event name for a trusted reusable workflow replay.
+    default: ''
+  event-path:
+    description: Optional JSON event file inside the workspace for a trusted replay.
+    default: ''
+outputs:
+  result:
+    description: Structured run outcome.
+    value: ${{ steps.run.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+      with:
+        node-version: '24.22.3'
+    - name: Install pinned Factory runtime dependencies
+      shell: bash
+      env:
+        FACTORY_ACTION_PATH: ${{ github.action_path }}
+      run: npm ci --prefix "$FACTORY_ACTION_PATH/actions" --ignore-scripts --no-audit --no-fund
+    - name: Run Factory Triage
+      id: run
+      shell: bash
+      env:
+        FACTORY_ACTION_PATH: ${{ github.action_path }}
+        FACTORY_READ_TOKEN: ${{ inputs.read-token }}
+        FACTORY_WRITE_TOKEN: ${{ inputs.write-token }}
+        FACTORY_APP_ID: ${{ inputs.app-id }}
+        FACTORY_APP_PRIVATE_KEY: ${{ inputs.app-private-key }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        FACTORY_BOT_LOGINS: ${{ inputs.bot-logins }}
+        FACTORY_ALLOW_SUBMODULE_PUBLICATION: ${{ inputs.allow-submodule-publication }}
+        FACTORY_EVIDENCE_DIRECTORY: ${{ inputs.evidence-directory }}
+        FACTORY_DEADLINE_MS: ${{ inputs.deadline-ms }}
+        FACTORY_MODE: ${{ inputs.mode }}
+        FACTORY_EVENT_NAME: ${{ inputs.event-name }}
+        FACTORY_EVENT_PATH: ${{ inputs.event-path }}
+      run: node "$FACTORY_ACTION_PATH/actions/dist/index.mjs"

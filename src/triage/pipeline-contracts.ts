@@ -17,6 +17,17 @@ const conversationEntrySchema = v.object({
 
 export const triagePipelineInputSchema = v.object({
 	sandboxId: nonEmptyString,
+	stage: v.optional(
+		v.picklist([
+			'reproduce',
+			'diagnose',
+			'verify',
+			'fix',
+			'comment',
+			'labels',
+			'pr',
+		]),
+	),
 	owner: nonEmptyString,
 	repo: nonEmptyString,
 	issueNumber: v.pipe(v.number(), v.integer(), v.minValue(1)),

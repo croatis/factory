@@ -549,7 +549,7 @@ triage:
 	});
 
 	it.each([
-		'openai/gpt-5',
+		'unsupported/gpt-5',
 		'kimi-k2.6',
 		'/claude-opus-4-6',
 		'anthropic/',

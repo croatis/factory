@@ -306,7 +306,7 @@ describe('release package baselines', () => {
 			astroRepo({
 				workspace: {
 					base: ASTRO_PNPM_WORKSPACE.replace(
-						/^packages:\n/m,
+						/^packages:\r?\n/m,
 						"packages:\n  - 'vendor/*'\n",
 					),
 				},

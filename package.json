@@ -10,6 +10,8 @@
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build",
+		"build:actions": "vite build --config vite.actions.config.ts",
+		"check:actions": "tsc -p actions/tsconfig.json",
 		"deploy": "vite build && wrangler deploy",
 		"cf-typegen": "wrangler types",
 		"check:types": "tsc --noEmit",
