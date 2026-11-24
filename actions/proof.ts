@@ -14,6 +14,12 @@ export async function proveRuntime(workspace: string, signal: AbortSignal) {
 	const inputPath = resolve(evidence, 'input.txt');
 	const outputPath = resolve(evidence, 'output.txt');
 	await writeFile(inputPath, nonce);
+	const skillDirectory = resolve(evidence, 'skill');
+	await mkdir(skillDirectory, { recursive: true });
+	await writeFile(
+		resolve(skillDirectory, 'SKILL.md'),
+		`# Runtime proof\nThis stage checks local file access only. It does not test the application.\nRead ${inputPath} with a local tool. Copy its exact contents to ${outputPath} with a local tool. Read back the output to verify it. Do not modify source files or start the application. Then submit reproducible=true, skipped=false, skippedReason=null.\n`,
+	);
 	const runtime = await startRuntime(evidence);
 	try {
 		const result = await submit(
@@ -31,8 +37,8 @@ export async function proveRuntime(workspace: string, signal: AbortSignal) {
 				conversation: [],
 				defaultBranch: 'master',
 				fixBranch: 'triagebot/fix-1',
-				skillName: 'triage',
-				skillDirectory: resolve(workspace, '.agents/skills/triage'),
+				skillName: 'runtime-proof',
+				skillDirectory,
 				model: ACTIONS_MODEL,
 				thinkingLevel: 'low',
 				stage: 'reproduce',
@@ -40,22 +46,22 @@ export async function proveRuntime(workspace: string, signal: AbortSignal) {
 				evidence,
 				allowSubmodulePublication: false,
 			},
-			`Runtime proof only. Do not triage the app or follow the triage skill. Use the local shell or filesystem tools to read ${inputPath} and copy its exact content into ${outputPath}. Do not modify any other file. Then call submit_reproduce_result with reproducible=true, skipped=false, skippedReason=null.`,
+			`Follow ${skillDirectory}/SKILL.md to complete the local file-access proof, then call submit_reproduce_result exactly once.`,
 			'reproduce',
 			reproduceResultSchema,
 			signal,
 		);
-		const output = await readFile(outputPath, 'utf8');
+		const output = await readFile(outputPath, 'utf8').catch(() => null);
 		// Text-file tools can append a final newline; the unpredictable nonce must survive unchanged.
-		if (!result.reproducible || output.trimEnd() !== nonce) {
+		if (!result.reproducible || output?.trimEnd() !== nonce) {
 			await writeFile(
 				resolve(evidence, 'result.json'),
 				JSON.stringify(
 					{
 						passed: false,
 						submission: result,
-						outputLength: output.length,
-						nonceMatches: output.trimEnd() === nonce,
+						outputLength: output?.length ?? null,
+						nonceMatches: output?.trimEnd() === nonce,
 					},
 					null,
 					2,

@@ -1078,6 +1078,23 @@ async function runPipeline(run, submodules) {
 	return result;
 }
 //#endregion
+//#region actions/readiness.ts
+var RuntimeNotReady = class extends Error {
+	constructor() {
+		super("Required application startup and provisioning did not complete.");
+	}
+};
+/** Keep failed startup from becoming a verified reproduction or published fix. */
+async function requireRuntimeReady(workspace, statePath) {
+	if (!statePath) return;
+	try {
+		const path = await containedPath(workspace, statePath);
+		const state = JSON.parse(await readFile(path, "utf8"));
+		if (state.status === "ready" && state.provisioned === true) return;
+	} catch {}
+	throw new RuntimeNotReady();
+}
+//#endregion
 //#region src/triage/agents/pipeline-core.ts
 /** Shared Factory pipeline tools and instructions for the Worker and Actions hosts. */
 function useTriagePipeline(input, location) {
@@ -2014,8 +2031,10 @@ async function runActions(options) {
 			published = v.parse(v.object({
 				branch: v.string(),
 				sha: v.string(),
-				pr: v.nullable(prContentSchema)
+				pr: v.nullable(prContentSchema),
+				runtimeVerified: v.optional(v.boolean())
 			}), checkpoint.publication);
+			if (options.requiredRuntimeState && !published.runtimeVerified) throw new RuntimeNotReady();
 			if (!branchCandidates(event.number).includes(published.branch)) throw new Error("Invalid publication checkpoint branch.");
 			if ((await read.rest.repos.getBranch({
 				owner,
@@ -2108,6 +2127,7 @@ async function runActions(options) {
 				stage
 			}, prompt, stage, schema, options.signal);
 			await writeFile(resolve(evidence, `${stage}-submission.json`), JSON.stringify(result, null, 2));
+			if (stage === "reproduce" && result.reproducible) await requireRuntimeReady(options.workspace, options.requiredRuntimeState);
 			return result;
 		};
 		const result = await runPipeline(run, options.allowSubmodulePublication);
@@ -2121,9 +2141,11 @@ async function runActions(options) {
 		let url;
 		let pushed = false;
 		if (result.fixed) {
+			await requireRuntimeReady(options.workspace, options.requiredRuntimeState);
 			const content = config.autoPrOnFix ? await run("pr", prContentPrompt(event.number, fix.branch, defaultBranch), prContentSchema) : null;
 			options.signal.throwIfAborted();
 			if ((await read.rest.issues.get(key)).data.state !== "open") throw new Error("The issue closed before publication.");
+			await requireRuntimeReady(options.workspace, options.requiredRuntimeState);
 			const publication = await publishWorkspace({
 				workspace: options.workspace,
 				branch: fix.branch,
@@ -2138,7 +2160,8 @@ async function runActions(options) {
 			published = {
 				branch: fix.branch,
 				sha: publication.sha,
-				pr: content
+				pr: content,
+				runtimeVerified: !!options.requiredRuntimeState
 			};
 			await save(formatTriageProgress(event.id, progress) + "\n\n" + checkpointText("published", void 0, published));
 			await writeFile(resolve(evidence, "publication.json"), JSON.stringify(publication, null, 2));
@@ -2170,7 +2193,7 @@ async function runActions(options) {
 		};
 	} catch (error) {
 		const status = error.status;
-		const reason = status === 401 || status === 403 ? "GitHub authentication or installation permissions failed; publication was not confirmed." : options.signal.aborted ? "The run exceeded its budget or was cancelled." : "The automated run failed. Review the private Actions logs and diagnostic artifacts.";
+		const reason = error instanceof RuntimeNotReady ? "Application startup or provisioning did not complete. No new verified fix was published; inspect the runtime diagnostics." : status === 401 || status === 403 ? "GitHub authentication or installation permissions failed; publication was not confirmed." : options.signal.aborted ? "The run exceeded its budget or was cancelled." : "The automated run failed. Review the private Actions logs and diagnostic artifacts.";
 		progress.failed = true;
 		const body = formatTriageProgress(event.id, progress, formatFailureComment(reason, failures + 1).replace("<!-- factory:triage-failed -->", "<!-- factory:triage-failed -->\n<!-- triagebot:triage-failed -->"));
 		if (published) {
@@ -2192,6 +2215,9 @@ async function proveRuntime(workspace, signal) {
 	const inputPath = resolve(evidence, "input.txt");
 	const outputPath = resolve(evidence, "output.txt");
 	await writeFile(inputPath, nonce);
+	const skillDirectory = resolve(evidence, "skill");
+	await mkdir(skillDirectory, { recursive: true });
+	await writeFile(resolve(skillDirectory, "SKILL.md"), `# Runtime proof\nThis stage checks local file access only. It does not test the application.\nRead ${inputPath} with a local tool. Copy its exact contents to ${outputPath} with a local tool. Read back the output to verify it. Do not modify source files or start the application. Then submit reproducible=true, skipped=false, skippedReason=null.\n`);
 	const runtime = await startRuntime(evidence);
 	try {
 		const result = await submit(ActionsTriagePipeline, `proof:${nonce}`, {
@@ -2206,22 +2232,22 @@ async function proveRuntime(workspace, signal) {
 			conversation: [],
 			defaultBranch: "master",
 			fixBranch: "triagebot/fix-1",
-			skillName: "triage",
-			skillDirectory: resolve(workspace, ".agents/skills/triage"),
+			skillName: "runtime-proof",
+			skillDirectory,
 			model: ACTIONS_MODEL,
 			thinkingLevel: "low",
 			stage: "reproduce",
 			workspace,
 			evidence,
 			allowSubmodulePublication: false
-		}, `Runtime proof only. Do not triage the app or follow the triage skill. Use the local shell or filesystem tools to read ${inputPath} and copy its exact content into ${outputPath}. Do not modify any other file. Then call submit_reproduce_result with reproducible=true, skipped=false, skippedReason=null.`, "reproduce", reproduceResultSchema, signal);
-		const output = await readFile(outputPath, "utf8");
-		if (!result.reproducible || output.trimEnd() !== nonce) {
+		}, `Follow ${skillDirectory}/SKILL.md to complete the local file-access proof, then call submit_reproduce_result exactly once.`, "reproduce", reproduceResultSchema, signal);
+		const output = await readFile(outputPath, "utf8").catch(() => null);
+		if (!result.reproducible || output?.trimEnd() !== nonce) {
 			await writeFile(resolve(evidence, "result.json"), JSON.stringify({
 				passed: false,
 				submission: result,
-				outputLength: output.length,
-				nonceMatches: output.trimEnd() === nonce
+				outputLength: output?.length ?? null,
+				nonceMatches: output?.trimEnd() === nonce
 			}, null, 2));
 			throw new Error("Local workspace proof failed. Inspect result.json.");
 		}
@@ -2336,6 +2362,7 @@ try {
 		},
 		botLogins: process.env.FACTORY_BOT_LOGINS,
 		evidenceDirectory: process.env.FACTORY_EVIDENCE_DIRECTORY || void 0,
+		requiredRuntimeState: process.env.FACTORY_REQUIRED_RUNTIME_STATE || void 0,
 		allowSubmodulePublication: process.env.FACTORY_ALLOW_SUBMODULE_PUBLICATION === "true",
 		signal: controller.signal
 	});

@@ -13,6 +13,7 @@ const mock = vi.hoisted(() => ({
 	verifySubmodules: vi.fn(),
 	result: 'fixed',
 	retriage: true,
+	afterStage: async (_stage: string) => {},
 }));
 vi.mock('../actions/auth.ts', () => ({
 	githubClients: async () => ({
@@ -49,6 +50,7 @@ vi.mock('../actions/runtime.ts', () => ({
 		schema: v.GenericSchema,
 	) => {
 		mock.submissions.push(channel);
+		await mock.afterStage(channel);
 		const results: Record<string, unknown> = {
 			decision: {
 				retriage: mock.retriage,
@@ -96,6 +98,7 @@ beforeEach(async () => {
 	mock.failPublication = false;
 	mock.result = 'fixed';
 	mock.retriage = true;
+	mock.afterStage = async () => {};
 	mock.publish.mockClear();
 	mock.prepare.mockReset();
 	mock.verifySubmodules.mockClear();
@@ -194,6 +197,80 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	await rm(workspace, { recursive: true, force: true });
+});
+
+it.each([
+	null,
+	'{',
+	'{"status":"failed","provisioned":false}',
+	'{"status":"ready","provisioned":false}',
+])(
+	'blocks reproduction after missing or unsuccessful startup: %s',
+	async (contents) => {
+		options.requiredRuntimeState = 'runtime-state.json';
+		if (contents !== null)
+			await writeFile(join(workspace, 'runtime-state.json'), contents);
+		await expect(runActions(options)).rejects.toThrow(
+			/startup and provisioning/,
+		);
+		expect(mock.submissions).toEqual(['reproduce']);
+		expect(mock.publish).not.toHaveBeenCalled();
+		expect(comments[0].body).toContain(
+			'Application startup or provisioning did not complete',
+		);
+	},
+);
+
+it('rechecks readiness after the fix and before publication', async () => {
+	options.requiredRuntimeState = 'runtime-state.json';
+	await writeFile(
+		join(workspace, 'runtime-state.json'),
+		'{"status":"ready","provisioned":true}',
+	);
+	mock.afterStage = async (stage) => {
+		if (stage === 'fix')
+			await writeFile(
+				join(workspace, 'runtime-state.json'),
+				'{"status":"failed","provisioned":true}',
+			);
+	};
+	await expect(runActions(options)).rejects.toThrow(/startup and provisioning/);
+	expect(mock.submissions).toEqual(['reproduce', 'diagnose', 'verify', 'fix']);
+	expect(mock.publish).not.toHaveBeenCalled();
+});
+
+it('does not require application startup for an unreproducible early exit', async () => {
+	options.requiredRuntimeState = 'absent.json';
+	mock.result = 'unreproducible';
+	expect(await runActions(options)).toMatchObject({ outcome: 'triaged' });
+	expect(mock.publish).not.toHaveBeenCalled();
+});
+
+it('recovers a checked publication but refuses an older unchecked checkpoint', async () => {
+	mock.api.rest.pulls.create.mockRejectedValueOnce(new Error('Unavailable'));
+	await expect(runActions(options)).rejects.toThrow(/Unavailable/);
+	options.requiredRuntimeState = 'runtime-state.json';
+	await expect(runActions(options)).rejects.toThrow(/startup and provisioning/);
+	expect(pulls).toEqual([]);
+});
+
+it('retains successful readiness verification across publication recovery', async () => {
+	options.requiredRuntimeState = 'runtime-state.json';
+	await writeFile(
+		join(workspace, 'runtime-state.json'),
+		'{"status":"ready","provisioned":true}',
+	);
+	mock.api.rest.pulls.create.mockRejectedValueOnce(new Error('Unavailable'));
+	await expect(runActions(options)).rejects.toThrow(/Unavailable/);
+	await rm(join(workspace, 'runtime-state.json'));
+	mock.api.rest.repos.getBranch.mockResolvedValue({
+		data: { commit: { sha: 'published-sha' } },
+	});
+	mock.prepare.mockReturnValue('published-sha');
+	expect(await runActions(options)).toMatchObject({
+		outcome: 'reconciled-publication',
+	});
+	expect(pulls).toHaveLength(1);
 });
 
 it('publishes one verified fix against the actual default and does not repeat a completed delivery', async () => {

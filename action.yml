@@ -28,6 +28,9 @@ inputs:
   deadline-ms:
     description: Absolute Unix deadline in milliseconds, leaving time for workflow cleanup.
     default: ''
+  required-runtime-state:
+    description: Optional workspace JSON file that must contain status ready and provisioned true before successful reproduction and new fix publication.
+    default: ''
   mode:
     description: triage or proof. Proof verifies OpenAI and workspace tools without GitHub publication.
     default: triage
@@ -66,6 +69,7 @@ runs:
         FACTORY_ALLOW_SUBMODULE_PUBLICATION: ${{ inputs.allow-submodule-publication }}
         FACTORY_EVIDENCE_DIRECTORY: ${{ inputs.evidence-directory }}
         FACTORY_DEADLINE_MS: ${{ inputs.deadline-ms }}
+        FACTORY_REQUIRED_RUNTIME_STATE: ${{ inputs.required-runtime-state }}
         FACTORY_MODE: ${{ inputs.mode }}
         FACTORY_EVENT_NAME: ${{ inputs.event-name }}
         FACTORY_EVENT_PATH: ${{ inputs.event-path }}

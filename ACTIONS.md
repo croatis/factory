@@ -46,6 +46,14 @@ perform repository-required submodule commits and pushes. Before publishing a pa
 that each retained gitlink matches a clean checkout and is reachable from freshly fetched remote branch refs,
 including nested submodules. A local-only SHA or stale tracking ref cannot establish publication.
 
+When application startup is mandatory, set `required-runtime-state` to the workspace JSON readiness file.
+The host requires `status: "ready"` and `provisioned: true` after a successful reproduction and before new fix
+publication. Missing, invalid, or failed readiness stops the pipeline with an infrastructure failure report.
+The workflow owns generation of fresh readiness evidence for its checkout and attempt. Publication checkpoints
+retain the successful readiness check so a later delivery can recover without repeating application startup.
+Unchecked older publication checkpoints cannot be recovered when this guard is enabled. Completed duplicate
+events and human confirmation of existing legacy fixes retain their normal routing.
+
 New fix branches use `triagebot/fix-<issue>`. Existing `flue/fix-<issue>` and `factory/fix-<issue>` branches and PRs
 remain recognized. Existing branch history is preserved; pushes are never forced. Multiple candidate open PRs
 or a mismatched base stop publication for maintainer reconciliation. PRs target the current repository default

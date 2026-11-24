@@ -50,6 +50,8 @@ try {
 					botLogins: process.env.FACTORY_BOT_LOGINS,
 					evidenceDirectory:
 						process.env.FACTORY_EVIDENCE_DIRECTORY || undefined,
+					requiredRuntimeState:
+						process.env.FACTORY_REQUIRED_RUNTIME_STATE || undefined,
 					allowSubmodulePublication:
 						process.env.FACTORY_ALLOW_SUBMODULE_PUBLICATION === 'true',
 					signal: controller.signal,

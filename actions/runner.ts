@@ -13,6 +13,7 @@ import {
 	verifySubmodulePublication,
 } from './workspace.ts';
 import { runPipeline, type StageRunner } from './pipeline.ts';
+import { requireRuntimeReady, RuntimeNotReady } from './readiness.ts';
 import { ActionsTriagePipeline } from './agent.ts';
 import { startRuntime, submit } from './runtime.ts';
 import { RetriageJudge } from '../src/triage/agents/retriage-judge.ts';
@@ -66,6 +67,7 @@ export interface RunOptions {
 	credentials: Credentials;
 	botLogins?: string;
 	evidenceDirectory?: string;
+	requiredRuntimeState?: string;
 	allowSubmodulePublication: boolean;
 	signal: AbortSignal;
 }
@@ -258,7 +260,12 @@ export async function runActions(options: RunOptions) {
 	};
 	let runtime: Awaited<ReturnType<typeof startRuntime>> | undefined;
 	let published:
-		| { branch: string; sha: string; pr: PrContent | null }
+		| {
+				branch: string;
+				sha: string;
+				pr: PrContent | null;
+				runtimeVerified?: boolean;
+		  }
 		| undefined;
 	async function finish(body: string, label?: string) {
 		// Commit the report to GitHub before labels, then mark completion. A rerun repairs this boundary.
@@ -360,9 +367,12 @@ export async function runActions(options: RunOptions) {
 					branch: v.string(),
 					sha: v.string(),
 					pr: v.nullable(prContentSchema),
+					runtimeVerified: v.optional(v.boolean()),
 				}),
 				checkpoint.publication,
 			);
+			if (options.requiredRuntimeState && !published.runtimeVerified)
+				throw new RuntimeNotReady();
 			if (!branchCandidates(event.number).includes(published.branch))
 				throw new Error('Invalid publication checkpoint branch.');
 			const remote = await read.rest.repos.getBranch({
@@ -509,6 +519,14 @@ export async function runActions(options: RunOptions) {
 				resolve(evidence, `${stage}-submission.json`),
 				JSON.stringify(result, null, 2),
 			);
+			if (
+				stage === 'reproduce' &&
+				(result as { reproducible?: boolean }).reproducible
+			)
+				await requireRuntimeReady(
+					options.workspace,
+					options.requiredRuntimeState,
+				);
 			return result;
 		};
 		const result = await runPipeline(run, options.allowSubmodulePublication);
@@ -527,6 +545,10 @@ export async function runActions(options: RunOptions) {
 		let url: string | undefined;
 		let pushed = false;
 		if (result.fixed) {
+			await requireRuntimeReady(
+				options.workspace,
+				options.requiredRuntimeState,
+			);
 			const content = config.autoPrOnFix
 				? await run(
 						'pr',
@@ -537,6 +559,10 @@ export async function runActions(options: RunOptions) {
 			options.signal.throwIfAborted();
 			if ((await read.rest.issues.get(key)).data.state !== 'open')
 				throw new Error('The issue closed before publication.');
+			await requireRuntimeReady(
+				options.workspace,
+				options.requiredRuntimeState,
+			);
 			const publication = await publishWorkspace({
 				workspace: options.workspace,
 				branch: fix.branch,
@@ -548,7 +574,12 @@ export async function runActions(options: RunOptions) {
 				token: await clients.writeToken(),
 			});
 			pushed = true;
-			published = { branch: fix.branch, sha: publication.sha, pr: content };
+			published = {
+				branch: fix.branch,
+				sha: publication.sha,
+				pr: content,
+				runtimeVerified: !!options.requiredRuntimeState,
+			};
 			await save(
 				formatTriageProgress(event.id, progress) +
 					'\n\n' +
@@ -622,11 +653,13 @@ export async function runActions(options: RunOptions) {
 		// Credentials and raw shell/provider errors must never enter public issue comments.
 		const status = (error as { status?: number }).status;
 		const reason =
-			status === 401 || status === 403
-				? 'GitHub authentication or installation permissions failed; publication was not confirmed.'
-				: options.signal.aborted
-					? 'The run exceeded its budget or was cancelled.'
-					: 'The automated run failed. Review the private Actions logs and diagnostic artifacts.';
+			error instanceof RuntimeNotReady
+				? 'Application startup or provisioning did not complete. No new verified fix was published; inspect the runtime diagnostics.'
+				: status === 401 || status === 403
+					? 'GitHub authentication or installation permissions failed; publication was not confirmed.'
+					: options.signal.aborted
+						? 'The run exceeded its budget or was cancelled.'
+						: 'The automated run failed. Review the private Actions logs and diagnostic artifacts.';
 		progress.failed = true;
 		const body = formatTriageProgress(
 			event.id,
