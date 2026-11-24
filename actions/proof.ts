@@ -14,7 +14,7 @@ export async function proveRuntime(workspace: string, signal: AbortSignal) {
 	const inputPath = resolve(evidence, 'input.txt');
 	const outputPath = resolve(evidence, 'output.txt');
 	await writeFile(inputPath, nonce);
-	const runtime = await startRuntime();
+	const runtime = await startRuntime(evidence);
 	try {
 		const result = await submit(
 			ActionsTriagePipeline,

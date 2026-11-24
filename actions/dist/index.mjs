@@ -1495,18 +1495,38 @@ function prWriterSkillFiles(input) {
 //#endregion
 //#region actions/runtime.ts
 /** Boot only Triage agents and the direct OpenAI provider, without an HTTP server. */
-async function startRuntime() {
+async function startRuntime(evidenceDirectory) {
 	const provider = openaiProvider();
+	let usageWrites = Promise.resolve();
+	const observed = /* @__PURE__ */ new WeakSet();
+	function observeUsage(response) {
+		if (observed.has(response)) return response;
+		observed.add(response);
+		response.result().then((message) => {
+			const record = {
+				model: message.model,
+				provider: message.provider,
+				usage: message.usage,
+				stopReason: message.stopReason,
+				completedAt: (/* @__PURE__ */ new Date()).toISOString()
+			};
+			console.log(`Factory model usage: ${JSON.stringify(record)}`);
+			if (evidenceDirectory) usageWrites = usageWrites.then(() => appendFile(resolve(evidenceDirectory, "model-usage.jsonl"), JSON.stringify(record) + "\n")).catch(() => {
+				console.error("Could not persist Factory model usage.");
+			});
+		}).catch(() => {});
+		return response;
+	}
 	const stream = provider.stream.bind(provider);
 	const streamSimple = provider.streamSimple.bind(provider);
-	provider.stream = (model, context, options) => stream(model, context, {
+	provider.stream = (model, context, options) => observeUsage(stream(model, context, {
 		...options,
 		maxRetries: 0
-	});
-	provider.streamSimple = (model, context, options) => streamSimple(model, context, {
+	}));
+	provider.streamSimple = (model, context, options) => observeUsage(streamSimple(model, context, {
 		...options,
 		maxRetries: 0
-	});
+	}));
 	RetriageJudge.durability = {
 		...RetriageJudge.durability,
 		maxAttempts: 1
@@ -1515,7 +1535,7 @@ async function startRuntime() {
 		...FixVerifier.durability,
 		maxAttempts: 1
 	};
-	return start({
+	const runtime = await start({
 		agents: [
 			ActionsTriagePipeline,
 			RetriageJudge,
@@ -1523,6 +1543,10 @@ async function startRuntime() {
 		],
 		providers: [provider]
 	});
+	return { stop: async () => {
+		await runtime.stop();
+		await usageWrites;
+	} };
 }
 function extractSubmission(data, channel, schema) {
 	if (data[channel]?.length !== 1) throw new Error(`Expected exactly one structured ${channel} submission.`);
@@ -1974,7 +1998,7 @@ async function runActions(options) {
 		return pull.html_url;
 	}
 	try {
-		runtime = await startRuntime();
+		runtime = await startRuntime(evidence);
 		if (action.type === "retriage") {
 			const decision = await submit(RetriageJudge, `${event.id}:retriage`, classifierInput, "Review the new comments and call submit_retriage_decision.", "decision", retriageDecisionSchema, options.signal);
 			if (!decision.retriage) {
@@ -2125,7 +2149,7 @@ async function proveRuntime(workspace, signal) {
 	const inputPath = resolve(evidence, "input.txt");
 	const outputPath = resolve(evidence, "output.txt");
 	await writeFile(inputPath, nonce);
-	const runtime = await startRuntime();
+	const runtime = await startRuntime(evidence);
 	try {
 		const result = await submit(ActionsTriagePipeline, `proof:${nonce}`, {
 			sandboxId: nonce,

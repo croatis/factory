@@ -347,7 +347,7 @@ export async function runActions(options: RunOptions) {
 		return pull.html_url;
 	}
 	try {
-		runtime = await startRuntime();
+		runtime = await startRuntime(evidence);
 		if (action.type === 'retriage') {
 			const decision = await submit(
 				RetriageJudge,
