@@ -25,7 +25,10 @@ vi.mock('../actions/workspace.ts', async (original) => ({
 	...(await original<any>()),
 	prepareWorkspace: (...args: unknown[]) => {
 		mock.prepare(...args);
-		return { head: 'base-sha', origin: 'https://github.com/owner/repo.git' };
+		return {
+			head: mock.prepare.mock.results.at(-1)?.value ?? 'base-sha',
+			origin: 'https://github.com/owner/repo.git',
+		};
 	},
 	verifySubmodulePublication: (...args: unknown[]) =>
 		mock.verifySubmodules(...args),
@@ -94,7 +97,7 @@ beforeEach(async () => {
 	mock.result = 'fixed';
 	mock.retriage = true;
 	mock.publish.mockClear();
-	mock.prepare.mockClear();
+	mock.prepare.mockReset();
 	mock.verifySubmodules.mockClear();
 	workspace = await mkdtemp(join(tmpdir(), 'factory-runner-'));
 	await mkdir(join(workspace, '.github'));
@@ -234,6 +237,48 @@ it('reports publication failure without creating a PR or claiming a delivered fi
 	expect(labels).toContain('triage: failed');
 	expect(comments[0].body).toContain('<!-- triagebot:triage-failed -->');
 	expect(comments[0].body).not.toContain('verified fix is available');
+});
+
+it.each(['before', 'after'])(
+	'recovers a PR failure %s creation without repeating the verified fix',
+	async (timing) => {
+		const create = mock.api.rest.pulls.create.getMockImplementation();
+		mock.api.rest.pulls.create.mockImplementationOnce(
+			async (input: unknown) => {
+				if (timing === 'after') await create(input);
+				throw new Error('Connection dropped');
+			},
+		);
+		await expect(runActions(options)).rejects.toThrow(/Connection dropped/);
+		expect(labels).toContain('triage: failed');
+		const stages = mock.submissions.length;
+		mock.api.rest.repos.getBranch.mockResolvedValue({
+			data: { commit: { sha: 'published-sha' } },
+		});
+		mock.prepare.mockReturnValue('published-sha');
+		expect(await runActions(options)).toMatchObject({
+			outcome: 'reconciled-publication',
+		});
+		expect(mock.submissions).toHaveLength(stages);
+		expect(pulls).toHaveLength(1);
+		expect(comments).toHaveLength(1);
+		expect(labels).toContain('triage: fix verified');
+		expect(mock.api.rest.pulls.create).toHaveBeenCalledTimes(
+			timing === 'after' ? 1 : 2,
+		);
+	},
+);
+
+it('refuses to recover publication when someone changed the remote branch', async () => {
+	mock.api.rest.pulls.create.mockRejectedValueOnce(new Error('Unavailable'));
+	await expect(runActions(options)).rejects.toThrow(/Unavailable/);
+	const stages = mock.submissions.length;
+	mock.api.rest.repos.getBranch.mockResolvedValue({
+		data: { commit: { sha: 'someone-elses-commit' } },
+	});
+	await expect(runActions(options)).rejects.toThrow(/branch changed/);
+	expect(mock.submissions).toHaveLength(stages);
+	expect(pulls).toEqual([]);
 });
 
 it('uses current closed state rather than stale opened event state', async () => {

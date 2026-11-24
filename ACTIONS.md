@@ -56,10 +56,15 @@ attempts. A report checkpoint is persisted before label updates and marked compl
 that boundary without repeating the investigation. An interrupted investigation starts a fresh local conversation
 against current GitHub state. Agent conversation persistence ends with the job.
 
+After a branch push, a publication checkpoint also retains its exact SHA and PR content. If PR creation or
+later reporting fails, rerunning that delivery verifies the remote SHA and submodules, then finishes delivery
+without another investigation. A changed remote branch stops recovery for reconciliation. A previously merged
+branch that is an ancestor of the current default is fast-forwarded before investigating a reopened issue.
+
 Factory progress comments and `triage: in progress` are retained. Failure comments include both Factory and
 legacy failure markers, counted once by this host. Three recorded failures stop automatic retries while the
-failure state remains set. A completed failed event is not replayed by rerunning the same delivery; a new human
-comment requests a new attempt. Intended behavior uses the not-actionable label. No issue-close cleanup,
+failure state remains set. A completed failure before publication needs a new human comment to request another
+attempt. Failures with a publication checkpoint can resume on the same delivery. Intended behavior uses the not-actionable label. No issue-close cleanup,
 persona handoff, preview release, or package publishing runs in this host.
 
 ## Trust boundary
@@ -87,6 +92,10 @@ Run the built distribution with `mode: proof` and an OpenAI project key before r
 The proof reads and writes a random nonce in the prepared workspace with local tools and returns Factory's
 structured reproduction submission. It creates no GitHub comments, labels, branches, or PRs.
 Its evidence is `.triagebot/factory-proof/result.json`.
+
+Model calls, including classifiers and compaction, also emit numeric usage records to the job log and
+`model-usage.jsonl` in the evidence directory. These contain no prompts, tool arguments, or response bodies.
+Cost fields are estimates from the pinned provider SDK's model table, not authoritative billing records.
 
 Run controlled root and nested-submodule pilots after the proof. Test rollback before enabling all issue events.
 Keep the old action available until pilot evidence is reviewed. For upstream updates, merge on a feature branch,

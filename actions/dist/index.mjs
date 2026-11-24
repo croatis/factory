@@ -1,9 +1,9 @@
 import { createRequire } from "node:module";
 import { appendFile, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
+import * as v from "valibot";
 import { App, Octokit } from "octokit";
 import { load } from "js-yaml";
-import * as v from "valibot";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -701,6 +701,16 @@ async function prepareWorkspace(workspace, branch, defaultBranch, existing, toke
 			"-b",
 			branch,
 			`refs/remotes/origin/${branch}`
+		]);
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		if (await git(root, [
+			"merge-base",
+			"HEAD",
+			`refs/remotes/origin/${defaultBranch}`
+		]) === head) await git(root, [
+			"merge",
+			"--ff-only",
+			`refs/remotes/origin/${defaultBranch}`
 		]);
 		await git(root, [
 			"submodule",
@@ -1876,9 +1886,10 @@ async function runActions(options) {
 			}
 		}
 	}
-	const checkpointText = (status, label) => `<!-- factory:actions-state:${Buffer.from(JSON.stringify({
+	const checkpointText = (status, label, publication) => `<!-- factory:actions-state:${Buffer.from(JSON.stringify({
 		status,
-		label
+		label,
+		publication
 	})).toString("base64url")} -->`;
 	if (checkpoint?.status === "done") return { outcome: "duplicate" };
 	if (checkpoint?.status === "ready") {
@@ -1917,6 +1928,7 @@ async function runActions(options) {
 		skipped: {}
 	};
 	let runtime;
+	let published;
 	async function finish(body, label) {
 		await save(`${body}\n\n${checkpointText("ready", label)}`);
 		if (label) await state(label);
@@ -1975,7 +1987,7 @@ async function runActions(options) {
 			pull: void 0
 		};
 	}
-	async function openPull(branch, content) {
+	async function openPull(branch, content, newFix = false) {
 		const api = await clients.write();
 		const matching = await api.rest.pulls.list({
 			owner,
@@ -1985,7 +1997,7 @@ async function runActions(options) {
 			per_page: 100
 		});
 		const open = matching.data.find((p) => p.state === "open" && p.base.ref === defaultBranch);
-		if (matching.data.some((p) => p.merged_at)) throw new Error("The existing fix was merged. Retriage requires a new branch policy decision.");
+		if (!open && !newFix && matching.data.some((p) => p.merged_at)) throw new Error("The existing fix was merged. Retriage requires a new branch policy decision.");
 		const pull = open ?? (await api.rest.pulls.create({
 			owner,
 			repo,
@@ -1998,6 +2010,29 @@ async function runActions(options) {
 		return pull.html_url;
 	}
 	try {
+		if (checkpoint?.status === "published") {
+			published = v.parse(v.object({
+				branch: v.string(),
+				sha: v.string(),
+				pr: v.nullable(prContentSchema)
+			}), checkpoint.publication);
+			if (!branchCandidates(event.number).includes(published.branch)) throw new Error("Invalid publication checkpoint branch.");
+			if ((await read.rest.repos.getBranch({
+				owner,
+				repo,
+				branch: published.branch
+			})).data.commit.sha !== published.sha) throw new Error("The published branch changed after the checkpoint; reconcile it before retrying.");
+			if ((await prepareWorkspace(options.workspace, published.branch, defaultBranch, true, await clients.writeToken())).head !== published.sha) throw new Error("The checkout changed after the publication checkpoint.");
+			await verifySubmodulePublication(options.workspace);
+			options.signal.throwIfAborted();
+			if ((await read.rest.issues.get(key)).data.state !== "open") throw new Error("The issue closed before publication.");
+			const url = published.pr ? await openPull(published.branch, published.pr, true) : void 0;
+			await finish(`Recovered the verified fix published by the interrupted run at commit ${published.sha}.\n\n${url ? `[Review the pull request](${url}).` : `The fix is on branch ${published.branch}.`}\n\nReview the original run's diagnostic artifacts for its test evidence.`, url ? config.labels.fixVerified : config.labels.needsTriage);
+			return {
+				outcome: "reconciled-publication",
+				url
+			};
+		}
 		runtime = await startRuntime(evidence);
 		if (action.type === "retriage") {
 			const decision = await submit(RetriageJudge, `${event.id}:retriage`, classifierInput, "Review the new comments and call submit_retriage_decision.", "decision", retriageDecisionSchema, options.signal);
@@ -2086,6 +2121,7 @@ async function runActions(options) {
 		let url;
 		let pushed = false;
 		if (result.fixed) {
+			const content = config.autoPrOnFix ? await run("pr", prContentPrompt(event.number, fix.branch, defaultBranch), prContentSchema) : null;
 			options.signal.throwIfAborted();
 			if ((await read.rest.issues.get(key)).data.state !== "open") throw new Error("The issue closed before publication.");
 			const publication = await publishWorkspace({
@@ -2099,11 +2135,14 @@ async function runActions(options) {
 				token: await clients.writeToken()
 			});
 			pushed = true;
+			published = {
+				branch: fix.branch,
+				sha: publication.sha,
+				pr: content
+			};
+			await save(formatTriageProgress(event.id, progress) + "\n\n" + checkpointText("published", void 0, published));
 			await writeFile(resolve(evidence, "publication.json"), JSON.stringify(publication, null, 2));
-			if (config.autoPrOnFix) {
-				const content = await run("pr", prContentPrompt(event.number, fix.branch, defaultBranch), prContentSchema);
-				url = await openPull(fix.branch, content);
-			}
+			if (content) url = await openPull(fix.branch, content, true);
 		}
 		const { priorityLabels, packageLabels } = partitionClassificationLabels(await fetchRepoLabels(read, owner, repo));
 		const report = await run("comment", commentStepPrompt({
@@ -2133,7 +2172,11 @@ async function runActions(options) {
 		const status = error.status;
 		const reason = status === 401 || status === 403 ? "GitHub authentication or installation permissions failed; publication was not confirmed." : options.signal.aborted ? "The run exceeded its budget or was cancelled." : "The automated run failed. Review the private Actions logs and diagnostic artifacts.";
 		progress.failed = true;
-		await finish(formatTriageProgress(event.id, progress, formatFailureComment(reason, failures + 1).replace("<!-- factory:triage-failed -->", "<!-- factory:triage-failed -->\n<!-- triagebot:triage-failed -->")), config.labels.failed).catch(() => {});
+		const body = formatTriageProgress(event.id, progress, formatFailureComment(reason, failures + 1).replace("<!-- factory:triage-failed -->", "<!-- factory:triage-failed -->\n<!-- triagebot:triage-failed -->"));
+		if (published) {
+			await save(body + "\n\n" + checkpointText("published", void 0, published)).catch(() => {});
+			await state(config.labels.failed).catch(() => {});
+		} else await finish(body, config.labels.failed).catch(() => {});
 		throw error;
 	} finally {
 		await runtime?.stop();

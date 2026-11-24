@@ -6,6 +6,7 @@ import {
 	git,
 	verifySubmodulePublication,
 	assertPublicationBranch,
+	prepareWorkspace,
 } from '../actions/workspace.ts';
 
 const directories: string[] = [];
@@ -53,7 +54,7 @@ async function fixture() {
 	await git(module, ['config', 'user.name', 'Factory test']);
 	await git(module, ['config', 'user.email', 'factory@example.invalid']);
 	await git(module, ['checkout', '-b', 'triagebot/fix-10']);
-	return { parent, module, remote };
+	return { parent, module, remote, source };
 }
 
 it('accepts a reachable retained submodule commit, including paths with spaces', async () => {
@@ -102,4 +103,28 @@ it('rejects the actual default branch even when it has a fix-like name', () => {
 	expect(() =>
 		assertPublicationBranch('triagebot/fix-10', 'triagebot/fix-10'),
 	).toThrow();
+});
+
+it('fast-forwards a previously merged fix branch before investigating a reopened issue', async () => {
+	const { source, remote } = await fixture();
+	const original = await git(source, ['rev-parse', 'HEAD']);
+	await git(source, ['push', 'origin', 'HEAD:refs/heads/triagebot/fix-10']);
+	await writeFile(join(source, 'new-default.txt'), 'current default contents');
+	await git(source, ['add', '.']);
+	await git(source, ['commit', '-m', 'Advance default']);
+	await git(source, ['push', 'origin', 'default']);
+	const current = await git(source, ['rev-parse', 'HEAD']);
+	const workspace = await prepareWorkspace(
+		source,
+		'triagebot/fix-10',
+		'default',
+		true,
+	);
+	expect(workspace.head).toBe(current);
+	expect(await git(source, ['branch', '--show-current'])).toBe(
+		'triagebot/fix-10',
+	);
+	expect(await git(remote, ['rev-parse', 'refs/heads/triagebot/fix-10'])).toBe(
+		original,
+	);
 });

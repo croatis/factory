@@ -200,8 +200,12 @@ export async function runActions(options: RunOptions) {
 			}
 		}
 	}
-	const checkpointText = (status: string, label?: string) =>
-		`<!-- factory:actions-state:${Buffer.from(JSON.stringify({ status, label })).toString('base64url')} -->`;
+	const checkpointText = (
+		status: string,
+		label?: string,
+		publication?: unknown,
+	) =>
+		`<!-- factory:actions-state:${Buffer.from(JSON.stringify({ status, label, publication })).toString('base64url')} -->`;
 	if (checkpoint?.status === 'done') return { outcome: 'duplicate' };
 	if (checkpoint?.status === 'ready') {
 		if (checkpoint.label) await state(checkpoint.label);
@@ -253,6 +257,9 @@ export async function runActions(options: RunOptions) {
 		skipped: {},
 	};
 	let runtime: Awaited<ReturnType<typeof startRuntime>> | undefined;
+	let published:
+		| { branch: string; sha: string; pr: PrContent | null }
+		| undefined;
 	async function finish(body: string, label?: string) {
 		// Commit the report to GitHub before labels, then mark completion. A rerun repairs this boundary.
 		await save(`${body}\n\n${checkpointText('ready', label)}`);
@@ -307,7 +314,7 @@ export async function runActions(options: RunOptions) {
 		}
 		return { branch: candidates[0], existing: false, pull: undefined };
 	}
-	async function openPull(branch: string, content: PrContent) {
+	async function openPull(branch: string, content: PrContent, newFix = false) {
 		const api = await clients.write();
 		const matching = await api.rest.pulls.list({
 			owner,
@@ -319,7 +326,7 @@ export async function runActions(options: RunOptions) {
 		const open = matching.data.find(
 			(p) => p.state === 'open' && p.base.ref === defaultBranch,
 		);
-		if (matching.data.some((p) => p.merged_at))
+		if (!open && !newFix && matching.data.some((p) => p.merged_at))
 			throw new Error(
 				'The existing fix was merged. Retriage requires a new branch policy decision.',
 			);
@@ -347,6 +354,50 @@ export async function runActions(options: RunOptions) {
 		return pull.html_url;
 	}
 	try {
+		if (checkpoint?.status === 'published') {
+			published = v.parse(
+				v.object({
+					branch: v.string(),
+					sha: v.string(),
+					pr: v.nullable(prContentSchema),
+				}),
+				checkpoint.publication,
+			);
+			if (!branchCandidates(event.number).includes(published.branch))
+				throw new Error('Invalid publication checkpoint branch.');
+			const remote = await read.rest.repos.getBranch({
+				owner,
+				repo,
+				branch: published.branch,
+			});
+			if (remote.data.commit.sha !== published.sha)
+				throw new Error(
+					'The published branch changed after the checkpoint; reconcile it before retrying.',
+				);
+			const recovered = await prepareWorkspace(
+				options.workspace,
+				published.branch,
+				defaultBranch,
+				true,
+				await clients.writeToken(),
+			);
+			if (recovered.head !== published.sha)
+				throw new Error(
+					'The checkout changed after the publication checkpoint.',
+				);
+			await verifySubmodulePublication(options.workspace);
+			options.signal.throwIfAborted();
+			if ((await read.rest.issues.get(key)).data.state !== 'open')
+				throw new Error('The issue closed before publication.');
+			const url = published.pr
+				? await openPull(published.branch, published.pr, true)
+				: undefined;
+			await finish(
+				`Recovered the verified fix published by the interrupted run at commit ${published.sha}.\n\n${url ? `[Review the pull request](${url}).` : `The fix is on branch ${published.branch}.`}\n\nReview the original run's diagnostic artifacts for its test evidence.`,
+				url ? config.labels.fixVerified : config.labels.needsTriage,
+			);
+			return { outcome: 'reconciled-publication', url };
+		}
 		runtime = await startRuntime(evidence);
 		if (action.type === 'retriage') {
 			const decision = await submit(
@@ -476,6 +527,13 @@ export async function runActions(options: RunOptions) {
 		let url: string | undefined;
 		let pushed = false;
 		if (result.fixed) {
+			const content = config.autoPrOnFix
+				? await run(
+						'pr',
+						prContentPrompt(event.number, fix.branch, defaultBranch),
+						prContentSchema,
+					)
+				: null;
 			options.signal.throwIfAborted();
 			if ((await read.rest.issues.get(key)).data.state !== 'open')
 				throw new Error('The issue closed before publication.');
@@ -490,18 +548,17 @@ export async function runActions(options: RunOptions) {
 				token: await clients.writeToken(),
 			});
 			pushed = true;
+			published = { branch: fix.branch, sha: publication.sha, pr: content };
+			await save(
+				formatTriageProgress(event.id, progress) +
+					'\n\n' +
+					checkpointText('published', undefined, published),
+			);
 			await writeFile(
 				resolve(evidence, 'publication.json'),
 				JSON.stringify(publication, null, 2),
 			);
-			if (config.autoPrOnFix) {
-				const content = await run(
-					'pr',
-					prContentPrompt(event.number, fix.branch, defaultBranch),
-					prContentSchema,
-				);
-				url = await openPull(fix.branch, content);
-			}
+			if (content) url = await openPull(fix.branch, content, true);
 		}
 		const { priorityLabels, packageLabels } = partitionClassificationLabels(
 			await fetchRepoLabels(read, owner, repo),
@@ -579,7 +636,12 @@ export async function runActions(options: RunOptions) {
 				'<!-- factory:triage-failed -->\n<!-- triagebot:triage-failed -->',
 			),
 		);
-		await finish(body, config.labels.failed).catch(() => {});
+		if (published) {
+			await save(
+				body + '\n\n' + checkpointText('published', undefined, published),
+			).catch(() => {});
+			await state(config.labels.failed).catch(() => {});
+		} else await finish(body, config.labels.failed).catch(() => {});
 		throw error;
 	} finally {
 		await runtime?.stop();

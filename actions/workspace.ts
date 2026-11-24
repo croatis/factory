@@ -115,6 +115,21 @@ export async function prepareWorkspace(
 			branch,
 			`refs/remotes/origin/${branch}`,
 		]);
+		// Reopened issues whose former fix was merged should investigate the current default.
+		const head = await git(root, ['rev-parse', 'HEAD']);
+		if (
+			(await git(root, [
+				'merge-base',
+				'HEAD',
+				`refs/remotes/origin/${defaultBranch}`,
+			])) === head
+		) {
+			await git(root, [
+				'merge',
+				'--ff-only',
+				`refs/remotes/origin/${defaultBranch}`,
+			]);
+		}
 		await git(root, ['submodule', 'update', '--init', '--recursive']);
 	} else {
 		await git(root, ['checkout', '-b', branch]);
