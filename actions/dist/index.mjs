@@ -632,6 +632,18 @@ function parseEvent(name, payload, repository, bots) {
 //#endregion
 //#region actions/workspace.ts
 var execute = promisify(execFile);
+/** Scope a parent credential to one Git process, without changing checkout/submodule credentials. */
+function githubGitEnvironment(token) {
+	return {
+		...process.env,
+		GIT_TERMINAL_PROMPT: "0",
+		GIT_CONFIG_COUNT: "2",
+		GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+		GIT_CONFIG_VALUE_0: "",
+		GIT_CONFIG_KEY_1: "http.https://github.com/.extraheader",
+		GIT_CONFIG_VALUE_1: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`
+	};
+}
 async function git(cwd, args, env = process.env) {
 	try {
 		return (await execute("git", args, {
@@ -661,7 +673,7 @@ async function containedPath(root, path) {
 	return resolved;
 }
 /** Use a legacy branch when present, without resetting any remote or local work. */
-async function prepareWorkspace(workspace, branch, defaultBranch, existing) {
+async function prepareWorkspace(workspace, branch, defaultBranch, existing, token) {
 	assertPublicationBranch(branch, defaultBranch);
 	const root = await realpath(workspace);
 	if (await realpath(await git(root, ["rev-parse", "--show-toplevel"])) !== root) throw new Error("Workspace must be the Git root.");
@@ -670,19 +682,20 @@ async function prepareWorkspace(workspace, branch, defaultBranch, existing) {
 		"--porcelain",
 		"--ignore-submodules=all"
 	])) throw new Error("The prepared superproject has existing source changes. Refusing to overwrite them.");
+	const fetchEnvironment = token ? githubGitEnvironment(token) : process.env;
 	await git(root, [
 		"fetch",
 		"--no-tags",
 		"origin",
 		`refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`
-	]);
+	], fetchEnvironment);
 	if (existing) {
 		await git(root, [
 			"fetch",
 			"--no-tags",
 			"origin",
 			`refs/heads/${branch}:refs/remotes/origin/${branch}`
-		]);
+		], fetchEnvironment);
 		await git(root, [
 			"checkout",
 			"-b",
@@ -778,15 +791,7 @@ async function publishWorkspace(options) {
 		"--name-only",
 		`${await git(workspace, ["rev-parse", `refs/remotes/origin/${defaultBranch}`])}...${sha}`
 	])) throw new Error("The verified fix has no changes relative to the default branch.");
-	const env = {
-		...process.env,
-		GIT_TERMINAL_PROMPT: "0",
-		GIT_CONFIG_COUNT: "2",
-		GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
-		GIT_CONFIG_VALUE_0: "",
-		GIT_CONFIG_KEY_1: "http.https://github.com/.extraheader",
-		GIT_CONFIG_VALUE_1: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`
-	};
+	const env = githubGitEnvironment(token);
 	await git(workspace, [
 		"push",
 		"origin",
@@ -1998,7 +2003,7 @@ async function runActions(options) {
 				return { outcome: `fix-${verdict.status}` };
 			}
 			if (!verdict.pr) throw new Error("Confirmed fix is missing PR content.");
-			await prepareWorkspace(options.workspace, fix.branch, defaultBranch, true);
+			await prepareWorkspace(options.workspace, fix.branch, defaultBranch, true, await clients.writeToken());
 			await verifySubmodulePublication(options.workspace);
 			if ((await read.rest.issues.get(key)).data.state !== "open") throw new Error("The issue closed before publication.");
 			const url = await openPull(fix.branch, verdict.pr);
@@ -2010,7 +2015,7 @@ async function runActions(options) {
 		}
 		await state(config.labels.inProgress);
 		await save(formatTriageProgress(event.id, progress));
-		const workspace = await prepareWorkspace(options.workspace, fix.branch, defaultBranch, fix.existing);
+		const workspace = await prepareWorkspace(options.workspace, fix.branch, defaultBranch, fix.existing, await clients.writeToken());
 		const skill = await containedPath(options.workspace, config.skill);
 		await readFile(resolve(skill, "SKILL.md"), "utf8");
 		const input = {
@@ -2122,7 +2127,7 @@ async function proveRuntime(workspace, signal) {
 	await writeFile(inputPath, nonce);
 	const runtime = await startRuntime();
 	try {
-		if (!(await submit(ActionsTriagePipeline, `proof:${nonce}`, {
+		const result = await submit(ActionsTriagePipeline, `proof:${nonce}`, {
 			sandboxId: nonce,
 			owner: "factory",
 			repo: "runtime-proof",
@@ -2136,13 +2141,23 @@ async function proveRuntime(workspace, signal) {
 			fixBranch: "triagebot/fix-1",
 			skillName: "triage",
 			skillDirectory: resolve(workspace, ".agents/skills/triage"),
-			model: "openai/gpt-5.5",
+			model: ACTIONS_MODEL,
 			thinkingLevel: "low",
 			stage: "reproduce",
 			workspace,
 			evidence,
 			allowSubmodulePublication: false
-		}, `Runtime proof only. Do not triage the app or follow the triage skill. Use the local shell or filesystem tools to read ${inputPath} and copy its exact content into ${outputPath}. Do not modify any other file. Then call submit_reproduce_result with reproducible=true, skipped=false, skippedReason=null.`, "reproduce", reproduceResultSchema, signal)).reproducible || await readFile(outputPath, "utf8") !== nonce) throw new Error("Local workspace proof failed.");
+		}, `Runtime proof only. Do not triage the app or follow the triage skill. Use the local shell or filesystem tools to read ${inputPath} and copy its exact content into ${outputPath}. Do not modify any other file. Then call submit_reproduce_result with reproducible=true, skipped=false, skippedReason=null.`, "reproduce", reproduceResultSchema, signal);
+		const output = await readFile(outputPath, "utf8");
+		if (!result.reproducible || output.trimEnd() !== nonce) {
+			await writeFile(resolve(evidence, "result.json"), JSON.stringify({
+				passed: false,
+				submission: result,
+				outputLength: output.length,
+				nonceMatches: output.trimEnd() === nonce
+			}, null, 2));
+			throw new Error("Local workspace proof failed. Inspect result.json.");
+		}
 		const proof = {
 			node: process.version,
 			model: ACTIONS_MODEL,

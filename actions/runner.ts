@@ -401,6 +401,7 @@ export async function runActions(options: RunOptions) {
 				fix.branch,
 				defaultBranch,
 				true,
+				await clients.writeToken(),
 			);
 			await verifySubmodulePublication(options.workspace);
 			if ((await read.rest.issues.get(key)).data.state !== 'open')
@@ -419,6 +420,7 @@ export async function runActions(options: RunOptions) {
 			fix.branch,
 			defaultBranch,
 			fix.existing,
+			await clients.writeToken(),
 		);
 		const skill = await containedPath(options.workspace, config.skill!);
 		await readFile(resolve(skill, 'SKILL.md'), 'utf8');

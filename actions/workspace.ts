@@ -5,6 +5,19 @@ import { resolve, relative, isAbsolute } from 'node:path';
 
 const execute = promisify(execFile);
 
+/** Scope a parent credential to one Git process, without changing checkout/submodule credentials. */
+export function githubGitEnvironment(token: string): NodeJS.ProcessEnv {
+	return {
+		...process.env,
+		GIT_TERMINAL_PROMPT: '0',
+		GIT_CONFIG_COUNT: '2',
+		GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+		GIT_CONFIG_VALUE_0: '',
+		GIT_CONFIG_KEY_1: 'http.https://github.com/.extraheader',
+		GIT_CONFIG_VALUE_1: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
+	};
+}
+
 export async function git(
 	cwd: string,
 	args: string[],
@@ -57,6 +70,7 @@ export async function prepareWorkspace(
 	branch: string,
 	defaultBranch: string,
 	existing: boolean,
+	token?: string,
 ) {
 	assertPublicationBranch(branch, defaultBranch);
 	const root = await realpath(workspace);
@@ -73,19 +87,28 @@ export async function prepareWorkspace(
 		throw new Error(
 			'The prepared superproject has existing source changes. Refusing to overwrite them.',
 		);
-	await git(root, [
-		'fetch',
-		'--no-tags',
-		'origin',
-		`refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`,
-	]);
-	if (existing) {
-		await git(root, [
+	const fetchEnvironment = token ? githubGitEnvironment(token) : process.env;
+	await git(
+		root,
+		[
 			'fetch',
 			'--no-tags',
 			'origin',
-			`refs/heads/${branch}:refs/remotes/origin/${branch}`,
-		]);
+			`refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`,
+		],
+		fetchEnvironment,
+	);
+	if (existing) {
+		await git(
+			root,
+			[
+				'fetch',
+				'--no-tags',
+				'origin',
+				`refs/heads/${branch}:refs/remotes/origin/${branch}`,
+			],
+			fetchEnvironment,
+		);
 		await git(root, [
 			'checkout',
 			'-b',
@@ -205,15 +228,7 @@ export async function publishWorkspace(options: {
 			'The verified fix has no changes relative to the default branch.',
 		);
 	// Reset inherited checkout headers only for this operation. Submodule credentials remain separate.
-	const env = {
-		...process.env,
-		GIT_TERMINAL_PROMPT: '0',
-		GIT_CONFIG_COUNT: '2',
-		GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
-		GIT_CONFIG_VALUE_0: '',
-		GIT_CONFIG_KEY_1: 'http.https://github.com/.extraheader',
-		GIT_CONFIG_VALUE_1: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
-	};
+	const env = githubGitEnvironment(token);
 	await git(workspace, ['push', 'origin', `HEAD:refs/heads/${branch}`], env);
 	const remote = await git(
 		workspace,

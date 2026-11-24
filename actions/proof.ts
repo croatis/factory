@@ -45,8 +45,24 @@ export async function proveRuntime(workspace: string, signal: AbortSignal) {
 			reproduceResultSchema,
 			signal,
 		);
-		if (!result.reproducible || (await readFile(outputPath, 'utf8')) !== nonce)
-			throw new Error('Local workspace proof failed.');
+		const output = await readFile(outputPath, 'utf8');
+		// Text-file tools can append a final newline; the unpredictable nonce must survive unchanged.
+		if (!result.reproducible || output.trimEnd() !== nonce) {
+			await writeFile(
+				resolve(evidence, 'result.json'),
+				JSON.stringify(
+					{
+						passed: false,
+						submission: result,
+						outputLength: output.length,
+						nonceMatches: output.trimEnd() === nonce,
+					},
+					null,
+					2,
+				),
+			);
+			throw new Error('Local workspace proof failed. Inspect result.json.');
+		}
 		const proof = {
 			node: process.version,
 			model: ACTIONS_MODEL,
